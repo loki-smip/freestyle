@@ -2,7 +2,6 @@ import { Orb } from "@renderer/components/ui/orb";
 import { getApiBase } from "@renderer/lib/api";
 import { Recorder } from "@renderer/lib/recorder";
 import { Streamer } from "@renderer/lib/streamer";
-import { Mic } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const BARS = 14;
@@ -30,11 +29,19 @@ type PillState =
   | "error";
 
 // ---------------------------------------------------------------------------
-// Sound system — generates short sine-wave tones via Web Audio API.
-// Sounds can be muted globally via the `sound_enabled` setting.
+// Sound system — single persistent AudioContext, avoids creating a new one
+// per tone.
 // ---------------------------------------------------------------------------
 
-let _soundEnabled = true; // cached; updated from settings on mount
+let _soundEnabled = true;
+let _toneCtx: AudioContext | null = null;
+
+function getToneCtx(): AudioContext {
+  if (!_toneCtx || _toneCtx.state === "closed") {
+    _toneCtx = new AudioContext();
+  }
+  return _toneCtx;
+}
 
 type TonePreset = "start" | "stop";
 const TONE_PRESETS: Record<TonePreset, { freq: number; ms: number }> = {
@@ -46,8 +53,7 @@ async function playTone(preset: TonePreset, volume = 0.3): Promise<void> {
   if (!_soundEnabled) return;
   const { freq, ms } = TONE_PRESETS[preset];
   try {
-    const ctx = new AudioContext();
-    // Resume context in case Chromium's autoplay policy suspended it
+    const ctx = getToneCtx();
     if (ctx.state === "suspended") await ctx.resume();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -59,7 +65,6 @@ async function playTone(preset: TonePreset, volume = 0.3): Promise<void> {
     gain.connect(ctx.destination);
     osc.start();
     osc.stop(ctx.currentTime + ms / 1000);
-    setTimeout(() => ctx.close(), ms + 200);
   } catch {
     // ignore audio errors
   }
@@ -85,11 +90,11 @@ export default function AppPage(): React.JSX.Element {
   const [elapsed, setElapsed] = useState(0);
   const [message, setMessage] = useState("");
   const [partialText, setPartialText] = useState("");
-  const [useStreaming, setUseStreaming] = useState(false);
+  const useStreamingRef = useRef(false);
 
   const recorderRef = useRef(new Recorder());
   const streamerRef = useRef<Streamer | null>(null);
-  const ctxRef = useRef<AudioContext | null>(null);
+  const analyserCtxRef = useRef<AudioContext | null>(null);
   const barsRef = useRef<number[]>(new Array(BARS).fill(0));
   const barsSvgRef = useRef<SVGSVGElement>(null);
   const volumeRef = useRef(0);
@@ -98,14 +103,43 @@ export default function AppPage(): React.JSX.Element {
   const timerRef = useRef<number>(0);
   const wantsMicRef = useRef(false);
   const appContextRef = useRef<string | null>(null);
-  const micWarmedUp = useRef(false); // true after first successful getUserMedia
+  const micWarmedUp = useRef(false);
 
   const getInputVolume = useCallback(() => volumeRef.current, []);
 
+  // -- Lazy singleton Streamer --
+  const getStreamer = useCallback((): Streamer => {
+    if (!streamerRef.current) {
+      streamerRef.current = new Streamer(getApiBase(), {
+        onConfig: (config) => {
+          useStreamingRef.current = config.streaming;
+        },
+        onReady: () => {},
+        onPartial: (text) => setPartialText(text),
+        onFinal: async (text) => {
+          recorderRef.current.cancel();
+          if (text.trim()) {
+            await window.api.pasteText(text);
+          }
+          hidePill();
+        },
+        onError: (msg) => {
+          recorderRef.current.cancel();
+          setState("error");
+          setMessage(msg);
+          setTimeout(() => hidePill(), 2000);
+        },
+      });
+    }
+    return streamerRef.current;
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // -- Audio visualization (from a MediaStream) --
   const startVisualization = useCallback((stream: MediaStream) => {
-    const ctx = new AudioContext();
-    ctxRef.current = ctx;
+    if (!analyserCtxRef.current || analyserCtxRef.current.state === "closed") {
+      analyserCtxRef.current = new AudioContext();
+    }
+    const ctx = analyserCtxRef.current;
     const source = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
@@ -116,7 +150,10 @@ export default function AppPage(): React.JSX.Element {
     const sliceSize = Math.floor(analyser.frequencyBinCount / BARS);
 
     const update = () => {
-      if (!wantsMicRef.current) return;
+      if (!wantsMicRef.current) {
+        source.disconnect();
+        return;
+      }
       analyser.getByteFrequencyData(dataArray);
       const raw: number[] = [];
       let totalSum = 0;
@@ -131,7 +168,6 @@ export default function AppPage(): React.JSX.Element {
       }
       barsRef.current = smoothBars(barsRef.current, raw);
       volumeRef.current = Math.min(1, (totalSum / BARS) * 2.5);
-      // Direct DOM update — avoids 60fps React re-renders (rerender-use-ref-transient-values)
       const svg = barsSvgRef.current;
       if (svg) {
         const lines = svg.querySelectorAll("line");
@@ -153,42 +189,41 @@ export default function AppPage(): React.JSX.Element {
     rafRef.current = 0;
     cancelAnimationFrame(timerRef.current);
     timerRef.current = 0;
-    if (ctxRef.current) {
-      try {
-        ctxRef.current.close();
-      } catch (_) {
-        /* ignore */
-      }
-      ctxRef.current = null;
-    }
+    // Don't close analyserCtxRef — we reuse it across sessions
     barsRef.current = new Array(BARS).fill(0);
     volumeRef.current = 0;
     setElapsed(0);
   }, []);
 
-  // Hide the pill immediately
+  // Hide the pill and reset to idle so the next show starts clean
   const hidePill = useCallback(() => {
+    setState("idle");
+    setPartialText("");
+    setMessage("");
     window.api.hidePill();
   }, []);
 
   // -- Start recording --
   const startRecording = useCallback(async () => {
-    if (wantsMicRef.current) return; // Already recording
+    if (wantsMicRef.current) return;
     wantsMicRef.current = true;
     setMessage("");
     setPartialText("");
 
-    // Capture frontmost app in parallel with mic acquisition (don't block on it)
     window.api
       ?.getFrontmostApp()
       .then((app) => {
         appContextRef.current = app;
+        if (app) {
+          try {
+            getStreamer().setContext(app);
+          } catch {}
+        }
       })
       .catch(() => {
         appContextRef.current = null;
       });
 
-    // Show initializing only on the very first press (mic not yet warmed up)
     const isFirstPress = !micWarmedUp.current;
     if (isFirstPress) {
       setState("initializing");
@@ -198,22 +233,23 @@ export default function AppPage(): React.JSX.Element {
     }
 
     try {
-      // Start the recorder (captures audio for REST transcription)
-      const stream = await recorderRef.current.start();
+      // When streaming is active, skip MediaRecorder entirely — the
+      // Streamer accumulates PCM16 and can produce a WAV if needed.
+      const stream = useStreamingRef.current
+        ? await recorderRef.current.acquireStream()
+        : await recorderRef.current.start();
 
       if (!wantsMicRef.current) {
         recorderRef.current.cancel();
         return;
       }
 
-      // Mark mic as warmed up after first successful acquisition
       if (isFirstPress) {
         micWarmedUp.current = true;
         playTone("start");
         setState("recording");
       }
 
-      // Start timer
       startTimeRef.current = Date.now();
       const updateTimer = () => {
         if (!wantsMicRef.current) return;
@@ -222,99 +258,64 @@ export default function AppPage(): React.JSX.Element {
       };
       timerRef.current = requestAnimationFrame(updateTimer);
 
-      // Start visualization from the recorder's stream
       startVisualization(stream);
 
-      // Try to also open a streaming connection for real-time partial text
       try {
-        const streamer = new Streamer(getApiBase(), {
-          onConfig: (config) => {
-            setUseStreaming(config.streaming);
-          },
-          onReady: () => {},
-          onPartial: (text) => setPartialText(text),
-          onFinal: async (text) => {
-            // Always clean up streamer and recorder after streaming completes
-            streamerRef.current?.close();
-            streamerRef.current = null;
-            recorderRef.current.cancel();
-
-            if (text.trim()) {
-              await window.api.pasteText(text);
-            }
-            hidePill();
-          },
-          onError: (msg) => {
-            // Clean up on streaming error
-            streamerRef.current?.close();
-            streamerRef.current = null;
-            recorderRef.current.cancel();
-            setState("error");
-            setMessage(msg);
-            setTimeout(() => hidePill(), 2000);
-          },
-        });
-        streamerRef.current = streamer;
-        // Start the streamer's mic separately (it gets its own stream)
-        await streamer.start();
-      } catch {
-        // Streaming is optional -- REST fallback always works
-        // Close the streamer if it partially initialized (e.g. WebSocket opened but mic failed)
-        streamerRef.current?.close();
-        streamerRef.current = null;
-      }
+        await getStreamer().startCapture(
+          stream,
+          analyserCtxRef.current ?? undefined,
+        );
+      } catch {}
     } catch (err) {
       wantsMicRef.current = false;
       setState("error");
       setMessage(err instanceof Error ? err.message : "Mic access denied");
       setTimeout(() => hidePill(), 2000);
     }
-  }, [startVisualization, hidePill]);
+  }, [startVisualization, hidePill, getStreamer]);
 
   // -- Commit: stop recording and transcribe --
   const commitRecording = useCallback(async () => {
     wantsMicRef.current = false;
     stopVisualization();
-    // Audio feedback: descending tone on stop
     playTone("stop");
 
-    // Skip recordings shorter than 1 second (likely accidental trigger)
     const recordingDuration = Date.now() - startTimeRef.current;
     if (recordingDuration < 1000) {
       recorderRef.current.cancel();
       streamerRef.current?.cancel();
-      streamerRef.current = null;
-      window.api.hidePill();
+      hidePill();
       return;
     }
 
-    const streamer = streamerRef.current;
-
-    // If streaming mode is active, just commit via WebSocket
-    if (useStreaming && streamer) {
+    // If streaming mode is active, commit via WebSocket
+    if (useStreamingRef.current && streamerRef.current) {
       setState("transcribing");
-      // Stop the recorder's mic stream (the streamer has its own)
       recorderRef.current.cancel();
-      streamer.commit();
-      // The onFinal callback will handle the paste and cleanup
+      streamerRef.current.commit();
       return;
     }
 
-    // REST fallback: stop recorder, send WAV
     setState("transcribing");
-    streamer?.close();
-    streamerRef.current = null;
+    streamerRef.current?.cancel();
 
     try {
-      let wavBlob: Blob;
-      if (recorderRef.current.isRecording()) {
+      // Prefer the Streamer's pre-encoded WAV (already 16kHz PCM16,
+      // no decode/resample overhead).  Fall back to MediaRecorder path
+      // only when the Streamer has no accumulated audio.
+      let wavBlob: Blob | null = streamerRef.current?.getWavBlob() ?? null;
+
+      if (!wavBlob && recorderRef.current.isRecording()) {
         wavBlob = await recorderRef.current.stop();
-      } else {
+      }
+
+      if (!wavBlob) {
         hidePill();
         return;
       }
 
-      // Use the frontmost app captured at recording start
+      recorderRef.current.cancel();
+
       const headers: Record<string, string> = {
         "Content-Type": "audio/wav",
       };
@@ -344,16 +345,15 @@ export default function AppPage(): React.JSX.Element {
       setMessage(err instanceof Error ? err.message : "Transcription failed");
       setTimeout(() => hidePill(), 2000);
     }
-  }, [useStreaming, stopVisualization, hidePill]);
+  }, [stopVisualization, hidePill]);
 
   const cancelRecording = useCallback(() => {
     wantsMicRef.current = false;
     stopVisualization();
     streamerRef.current?.cancel();
-    streamerRef.current = null;
     recorderRef.current.cancel();
-    window.api.hidePill();
-  }, [stopVisualization]);
+    hidePill();
+  }, [stopVisualization, hidePill]);
 
   // Load sound preference from server settings
   useEffect(() => {
@@ -377,7 +377,6 @@ export default function AppPage(): React.JSX.Element {
   useEffect(() => {
     const removeDown = window.api.onHotkeyDown(() => {
       const s = stateRef.current;
-      // Allow starting from idle or terminal states (transcribing/error)
       if (s === "idle" || s === "transcribing" || s === "error") {
         startRecording();
       }
@@ -400,6 +399,8 @@ export default function AppPage(): React.JSX.Element {
   useEffect(() => {
     return () => {
       cancelRecording();
+      streamerRef.current?.destroy();
+      streamerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cancelRecording]);
@@ -408,7 +409,6 @@ export default function AppPage(): React.JSX.Element {
   const gap = SVG_WIDTH / BARS;
   const barWidth = Math.min(gap * 0.55, 5);
 
-  // Animated glow uses CSS animation via a class
   const glowState =
     state === "initializing"
       ? "glow-initializing"
@@ -448,9 +448,33 @@ export default function AppPage(): React.JSX.Element {
           .glow-transcribing { animation: glow-pulse-blue 1.5s ease-in-out infinite; }
           .glow-error { animation: glow-pulse-red 1.5s ease-in-out infinite; }
           .glow-idle { box-shadow: 0 0 6px 2px rgba(161,161,170,0.05); transition: box-shadow 300ms ease; }
+          @keyframes shimmer {
+            0% { background-position: 100% center; }
+            100% { background-position: 0% center; }
+          }
+          .shimmer-text {
+            font-style: italic;
+            background: linear-gradient(
+              90deg,
+              #71717a calc(50% - 40px),
+              #d4d4d8,
+              #71717a calc(50% + 40px)
+            );
+            background-size: 250% 100%;
+            background-clip: text;
+            -webkit-background-clip: text;
+            color: transparent;
+            animation: shimmer 2s linear infinite;
+          }
         `}
       </style>
-      <div className={glowState} style={{ borderRadius: 28 }}>
+      <div
+        className={glowState}
+        style={{
+          borderRadius: 28,
+          visibility: state === "idle" ? "hidden" : "visible",
+        }}
+      >
         <div
           className="inline-flex items-center gap-3"
           style={
@@ -511,7 +535,7 @@ export default function AppPage(): React.JSX.Element {
           {/* Right-side content changes per state */}
           {state === "initializing" && (
             <span style={pillTextStyle}>
-              <span style={{ opacity: 0.7 }}>Listening...</span>
+              <span className="shimmer-text">Listening...</span>
             </span>
           )}
 
@@ -578,24 +602,16 @@ export default function AppPage(): React.JSX.Element {
 
           {state === "transcribing" && (
             <span style={pillTextStyle}>
-              {partialText ? partialText.slice(-30) : "Transcribing..."}
+              {partialText ? (
+                partialText.slice(-30)
+              ) : (
+                <span className="shimmer-text">Transcribing...</span>
+              )}
             </span>
           )}
 
           {state === "error" && (
             <span style={pillTextStyle}>{message || "Error"}</span>
-          )}
-
-          {state === "idle" && (
-            <div
-              className="inline-flex items-center gap-2"
-              style={{ padding: "0 8px" }}
-            >
-              <Mic size={17} style={{ opacity: 0.5, color: "#a1a1aa" }} />
-              <span style={{ opacity: 0.5, color: "#a1a1aa" }}>
-                Hold hotkey to record
-              </span>
-            </div>
           )}
         </div>
       </div>

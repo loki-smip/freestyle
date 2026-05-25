@@ -13,6 +13,7 @@ export interface StreamCallbacks {
 export interface StreamSession {
   sendAudio(chunk: ArrayBuffer): void;
   commit(): void;
+  cancel(): void;
   close(): void;
 }
 
@@ -21,14 +22,14 @@ const REALTIME_URL = "wss://api.openai.com/v1/realtime?intent=transcription";
 /**
  * Opens a streaming transcription session via OpenAI's Realtime API.
  * Supports models like gpt-4o-transcribe, gpt-4o-mini-transcribe.
- * Falls back gracefully if the model doesn't support streaming.
  */
 export function openStreamingSession(opts: {
   apiKey: string;
   model: string;
+  prompt?: string;
   callbacks: StreamCallbacks;
 }): StreamSession {
-  const { apiKey, model, callbacks } = opts;
+  const { apiKey, model, prompt, callbacks } = opts;
   let partialText = "";
   let configured = false;
 
@@ -40,12 +41,15 @@ export function openStreamingSession(opts: {
   });
 
   ws.on("open", () => {
+    const transcription: Record<string, unknown> = { model };
+    if (prompt) transcription.prompt = prompt;
+
     ws.send(
       JSON.stringify({
         type: "transcription_session.update",
         session: {
           input_audio_format: "pcm16",
-          input_audio_transcription: { model },
+          input_audio_transcription: transcription,
           turn_detection: null,
         },
       }),
@@ -79,6 +83,7 @@ export function openStreamingSession(opts: {
         const text =
           typeof evt.transcript === "string" ? evt.transcript : partialText;
         callbacks.onFinal(text.trim());
+        partialText = "";
         return;
       }
       case "error": {
@@ -115,6 +120,12 @@ export function openStreamingSession(opts: {
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
     },
+    cancel(): void {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      // Clear the audio buffer without triggering a transcription
+      ws.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+      partialText = "";
+    },
     close(): void {
       if (ws.readyState <= WebSocket.OPEN) ws.close();
     },
@@ -132,7 +143,6 @@ export function supportsStreaming(
 ): boolean {
   if (providerId !== "openai") return false;
   const short = modelId.includes("/") ? modelId.split("/").pop()! : modelId;
-  // whisper-1 doesn't support streaming, gpt-4o-transcribe variants do
   return short.includes("transcribe");
 }
 

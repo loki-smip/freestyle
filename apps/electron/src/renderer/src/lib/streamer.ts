@@ -1,113 +1,150 @@
 /**
- * WebSocket-based audio streamer for real-time STT.
- * Sends raw PCM16 audio chunks to the server, receives partial/final transcripts.
+ * Persistent WebSocket-based audio streamer for real-time STT.
+ *
+ * A single Streamer instance stays alive across recording sessions.
+ * The WebSocket to the server (and through it the OpenAI Realtime
+ * upstream) remains open, eliminating reconnection overhead on each
+ * hotkey press.  Recording sessions are delimited by startCapture /
+ * commit / cancel rather than connect / disconnect.
  */
 
 import { getPCMProcessorUrl } from "./pcm-processor";
+import { encodeWavFromInt16 } from "./wav";
 
 const TARGET_RATE = 16000;
 
 export interface StreamerCallbacks {
   onPartial: (text: string) => void;
   onFinal: (text: string) => void;
+  onCleaned?: (text: string) => void;
   onError: (message: string) => void;
-  onReady: (model: string) => void;
+  onReady: () => void;
   onConfig: (config: { streaming: boolean; model: string }) => void;
 }
 
 export class Streamer {
   private ws: WebSocket | null = null;
-  private stream: MediaStream | null = null;
-  private ctx: AudioContext | null = null;
-  private source: MediaStreamAudioSourceNode | null = null;
-  private workletNode: AudioWorkletNode | null = null;
   private sessionReady = false;
   private pendingChunks: ArrayBuffer[] = [];
-  private closed = false;
+  private destroyed = false;
   private readonly callbacks: StreamerCallbacks;
   private readonly wsUrl: string;
+
+  // Capture pipeline — reused across sessions when possible
+  private ctx: AudioContext | null = null;
+  private workletReady = false;
+  private source: MediaStreamAudioSourceNode | null = null;
+  private workletNode: AudioWorkletNode | null = null;
+  private capturing = false;
+
+  // PCM accumulator for REST fallback WAV generation
+  private pcmChunks: Int16Array[] = [];
+  private pcmSampleCount = 0;
 
   constructor(baseUrl: string, callbacks: StreamerCallbacks) {
     this.wsUrl = `${baseUrl.replace(/^http/, "ws")}/stream`;
     this.callbacks = callbacks;
+    this.openWebSocket();
   }
 
-  async start(deviceId?: string | null): Promise<MediaStream> {
-    // Open WebSocket
-    this.openWebSocket();
+  // ------- public API -------
 
-    // Acquire mic
-    const processing = {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
-    };
+  setContext(context: string): void {
+    this.sendJSON({ type: "context", context });
+  }
 
-    try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: deviceId
-          ? { deviceId: { exact: deviceId }, ...processing }
-          : processing,
-      });
-    } catch (e) {
-      const name = e instanceof Error ? e.name : "";
-      if (
-        deviceId &&
-        (name === "OverconstrainedError" || name === "NotFoundError")
-      ) {
-        this.stream = await navigator.mediaDevices.getUserMedia({
-          audio: processing,
-        });
-      } else {
-        throw e;
+  async startCapture(
+    stream: MediaStream,
+    sharedCtx?: AudioContext,
+  ): Promise<void> {
+    this.capturing = true;
+    this.pendingChunks = [];
+    this.pcmChunks = [];
+    this.pcmSampleCount = 0;
+    this.sendJSON({ type: "start" });
+
+    if (sharedCtx && sharedCtx.state !== "closed") {
+      if (this.ctx && this.ctx !== sharedCtx) {
+        try {
+          this.ctx.close();
+        } catch {}
       }
+      this.ctx = sharedCtx;
+    }
+    if (!this.ctx || this.ctx.state === "closed") {
+      this.ctx = new AudioContext();
+    }
+    if (this.ctx.state === "suspended") await this.ctx.resume();
+
+    if (!this.workletReady) {
+      await this.ctx.audioWorklet.addModule(getPCMProcessorUrl());
+      this.workletReady = true;
     }
 
-    // Set up audio processing: downsample to 16kHz mono PCM16
-    this.ctx = new AudioContext();
-    this.source = this.ctx.createMediaStreamSource(this.stream);
-
-    await this.ctx.audioWorklet.addModule(getPCMProcessorUrl());
+    this.source = this.ctx.createMediaStreamSource(stream);
     this.workletNode = new AudioWorkletNode(this.ctx, "pcm-processor");
     this.workletNode.port.onmessage = (e: MessageEvent) => {
-      if (this.closed) return;
-      const input = new Float32Array(e.data);
-      const pcm16 = downsampleAndEncode(
-        input,
-        this.ctx!.sampleRate,
-        TARGET_RATE,
-      );
-      this.sendAudio(pcm16.buffer as ArrayBuffer);
-    };
+      if (!this.capturing) return;
+      const chunk = e.data as ArrayBuffer;
+      this.sendAudio(chunk);
 
+      // Accumulate for REST fallback
+      const pcm16 = new Int16Array(chunk);
+      this.pcmChunks.push(pcm16);
+      this.pcmSampleCount += pcm16.length;
+    };
     this.source.connect(this.workletNode);
     this.workletNode.connect(this.ctx.destination);
-
-    return this.stream;
   }
 
   commit(): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "commit" }));
-    }
+    this.stopCapture();
+    this.sendJSON({ type: "commit" });
   }
 
   cancel(): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "cancel" }));
-    }
-    this.close();
+    this.stopCapture();
+    this.sendJSON({ type: "cancel" });
   }
 
-  close(): void {
-    this.closed = true;
+  getWavBlob(): Blob | null {
+    if (this.pcmSampleCount === 0) return null;
+    const blob = encodeWavFromInt16(
+      this.pcmChunks,
+      this.pcmSampleCount,
+      TARGET_RATE,
+    );
+    this.pcmChunks = [];
+    this.pcmSampleCount = 0;
+    return blob;
+  }
+
+  destroy(): void {
+    this.destroyed = true;
     this.stopCapture();
     if (this.ws && this.ws.readyState <= WebSocket.OPEN) this.ws.close();
     this.ws = null;
+    if (this.ctx) {
+      try {
+        this.ctx.close();
+      } catch {}
+      this.ctx = null;
+      this.workletReady = false;
+    }
   }
 
-  getStream(): MediaStream | null {
-    return this.stream;
+  // ------- internals -------
+
+  private stopCapture(): void {
+    this.capturing = false;
+    try {
+      this.workletNode?.disconnect();
+    } catch {}
+    try {
+      this.source?.disconnect();
+    } catch {}
+    this.workletNode = null;
+    this.source = null;
   }
 
   private sendAudio(chunk: ArrayBuffer): void {
@@ -115,6 +152,12 @@ export class Streamer {
       this.ws.send(chunk);
     } else {
       this.pendingChunks.push(chunk);
+    }
+  }
+
+  private sendJSON(obj: Record<string, unknown>): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(obj));
     }
   }
 
@@ -127,6 +170,7 @@ export class Streamer {
   }
 
   private openWebSocket(): void {
+    if (this.destroyed) return;
     const ws = new WebSocket(this.wsUrl);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
@@ -151,15 +195,11 @@ export class Streamer {
             streaming: msg.streaming ?? false,
             model: msg.model ?? "",
           });
-          // If not streaming, server closed the WS -- client should use REST
-          if (!msg.streaming) {
-            this.close();
-          }
           break;
         case "session.ready":
           this.sessionReady = true;
           this.flushPendingChunks();
-          this.callbacks.onReady(msg.model ?? "");
+          this.callbacks.onReady();
           break;
         case "partial":
           this.callbacks.onPartial(msg.text ?? "");
@@ -167,64 +207,25 @@ export class Streamer {
         case "final":
           this.callbacks.onFinal(msg.text ?? "");
           break;
+        case "cleaned":
+          this.callbacks.onCleaned?.(msg.text ?? "");
+          break;
         case "error":
           this.callbacks.onError(msg.message ?? "Unknown error");
           break;
       }
     });
 
-    ws.addEventListener("error", () => {
-      this.callbacks.onError("WebSocket connection failed");
-    });
+    ws.addEventListener("error", () => {});
 
     ws.addEventListener("close", () => {
-      if (!this.closed) {
-        this.sessionReady = false;
-        this.pendingChunks = [];
+      this.sessionReady = false;
+      this.pendingChunks = [];
+      if (!this.destroyed) {
         setTimeout(() => {
-          if (!this.closed) this.openWebSocket();
+          if (!this.destroyed) this.openWebSocket();
         }, 1000);
       }
     });
   }
-
-  private stopCapture(): void {
-    try {
-      this.workletNode?.disconnect();
-    } catch {}
-    try {
-      this.source?.disconnect();
-    } catch {}
-    this.workletNode = null;
-    this.source = null;
-    this.stream?.getTracks().forEach((t) => t.stop());
-    this.stream = null;
-    if (this.ctx) {
-      try {
-        this.ctx.close();
-      } catch {}
-      this.ctx = null;
-    }
-  }
-}
-
-/**
- * Downsample float32 audio to target rate and encode as PCM16.
- */
-function downsampleAndEncode(
-  input: Float32Array,
-  fromRate: number,
-  toRate: number,
-): Int16Array {
-  const ratio = fromRate / toRate;
-  const outLength = Math.round(input.length / ratio);
-  const output = new Int16Array(outLength);
-
-  for (let i = 0; i < outLength; i++) {
-    const srcIndex = Math.round(i * ratio);
-    const sample = Math.max(-1, Math.min(1, input[srcIndex] ?? 0));
-    output[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-  }
-
-  return output;
 }
