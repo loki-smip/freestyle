@@ -48,6 +48,13 @@ declare global {
       onHotkeyError: (
         callback: (error: { message: string }) => void,
       ) => () => void;
+      // Audio level stream
+      sendAudioLevel: (level: number) => void;
+      onAudioLevel: (callback: (level: number) => void) => () => void;
+      // Transcription completion broadcast
+      sendTranscriptionDone: () => void;
+      onTranscriptionDone: (callback: () => void) => () => void;
+      // Fullscreen state
       onFullscreenChanged: (
         callback: (isFullscreen: boolean) => void,
       ) => () => void;

@@ -1,10 +1,11 @@
 import AppPage from "@renderer/pages/app";
 import { lazy, Suspense } from "react";
-import { Navigate, Route, Routes } from "react-router";
+import { Navigate, Outlet, Route, Routes } from "react-router";
 
 const OnboardingPage = lazy(() => import("@renderer/pages/onboarding"));
 const NotFoundPage = lazy(() => import("@renderer/pages/not-found"));
-const SettingsLayout = lazy(() => import("@renderer/pages/settings/layout"));
+const AppShell = lazy(() => import("@renderer/pages/shell"));
+const TodayPage = lazy(() => import("@renderer/pages/today"));
 const GeneralSettingsPage = lazy(
   () => import("@renderer/pages/settings/general"),
 );
@@ -19,23 +20,35 @@ const PermissionsPage = lazy(
   () => import("@renderer/pages/settings/permissions"),
 );
 
+function PagePad(): React.JSX.Element {
+  return (
+    <div className="px-12 py-9">
+      <Outlet />
+    </div>
+  );
+}
+
 export default function App(): React.JSX.Element {
   return (
     <Suspense fallback={null}>
       <Routes>
-        <Route path="/" element={<Navigate to="/app" replace />} />
+        <Route path="/" element={<Navigate to="/today" replace />} />
         <Route path="/app" element={<AppPage />} />
         <Route path="/onboarding" element={<OnboardingPage />} />
-        <Route path="/settings" element={<SettingsLayout />}>
-          <Route index element={<Navigate to="general" replace />} />
-          <Route path="general" element={<GeneralSettingsPage />} />
-          <Route path="models" element={<ModelsPage />} />
-          <Route path="dictionary" element={<DictionaryPage />} />
-          <Route path="formats" element={<FormatsPage />} />
-          <Route path="history" element={<HistoryPage />} />
-          <Route path="feedback" element={<FeedbackPage />} />
-          <Route path="permissions" element={<PermissionsPage />} />
+
+        <Route element={<AppShell />}>
+          <Route path="/today" element={<TodayPage />} />
+          <Route element={<PagePad />}>
+            <Route path="/settings" element={<GeneralSettingsPage />} />
+            <Route path="/settings/models" element={<ModelsPage />} />
+            <Route path="/settings/dictionary" element={<DictionaryPage />} />
+            <Route path="/settings/formats" element={<FormatsPage />} />
+            <Route path="/settings/history" element={<HistoryPage />} />
+            <Route path="/settings/feedback" element={<FeedbackPage />} />
+            <Route path="/settings/permissions" element={<PermissionsPage />} />
+          </Route>
         </Route>
+
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </Suspense>

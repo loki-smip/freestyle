@@ -108,6 +108,7 @@ export default function AppPage(): React.JSX.Element {
   const getInputVolume = useCallback(() => volumeRef.current, []);
 
   // -- Lazy singleton Streamer --
+  // biome-ignore lint/correctness/useExhaustiveDependencies: singleton must only be created once; hidePill is itself a stable useCallback declared below
   const getStreamer = useCallback((): Streamer => {
     if (!streamerRef.current) {
       streamerRef.current = new Streamer(getApiBase(), {
@@ -120,6 +121,7 @@ export default function AppPage(): React.JSX.Element {
           recorderRef.current.cancel();
           if (text.trim()) {
             await window.api.pasteText(text);
+            window.api?.sendTranscriptionDone();
           }
           hidePill();
         },
@@ -132,7 +134,7 @@ export default function AppPage(): React.JSX.Element {
       });
     }
     return streamerRef.current;
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   // -- Audio visualization (from a MediaStream) --
   const startVisualization = useCallback((stream: MediaStream) => {
@@ -167,7 +169,11 @@ export default function AppPage(): React.JSX.Element {
         totalSum += val;
       }
       barsRef.current = smoothBars(barsRef.current, raw);
-      volumeRef.current = Math.min(1, (totalSum / BARS) * 2.5);
+      const volume = Math.min(1, (totalSum / BARS) * 2.5);
+      volumeRef.current = volume;
+      // Broadcast for other windows (Today tutorial wave) — fire-and-forget IPC
+      window.api?.sendAudioLevel(volume);
+      // Direct DOM update — avoids 60fps React re-renders (rerender-use-ref-transient-values)
       const svg = barsSvgRef.current;
       if (svg) {
         const lines = svg.querySelectorAll("line");
@@ -338,6 +344,7 @@ export default function AppPage(): React.JSX.Element {
 
       if (text.trim()) {
         await window.api.pasteText(text);
+        window.api?.sendTranscriptionDone();
       }
       hidePill();
     } catch (err) {
