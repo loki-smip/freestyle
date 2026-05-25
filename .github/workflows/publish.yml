@@ -51,9 +51,10 @@ jobs:
 
       - name: Install Craft
         run: |
-          CRAFT_VERSION=$(curl -sL https://api.github.com/repos/getsentry/craft/releases/latest | jq -r .tag_name)
-          curl -sL "https://github.com/getsentry/craft/releases/download/${CRAFT_VERSION}/craft-linux" -o /usr/local/bin/craft
-          chmod +x /usr/local/bin/craft
+          CRAFT_URL=$(curl -fsSL https://api.github.com/repos/getsentry/craft/releases/latest \
+            | jq -r '.assets[] | select(.name == "craft") | .browser_download_url')
+          sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
+          sudo chmod +x /usr/local/bin/craft
 
       - name: Wait for CI on release branch
         env:
