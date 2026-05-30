@@ -2,15 +2,7 @@ import markDark from "@renderer/assets/mark-dark.svg";
 import markLight from "@renderer/assets/mark-light.svg";
 import { cn } from "@renderer/lib/utils";
 import type { LucideIcon } from "lucide-react";
-import {
-  Book,
-  BookOpen,
-  Clock,
-  Cpu,
-  FileText,
-  MessageSquare,
-  Sliders,
-} from "lucide-react";
+import { Book, BookOpen, Clock, Cpu, FileText, Sliders } from "lucide-react";
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router";
 
@@ -38,12 +30,6 @@ const navItems: NavItem[] = [
   },
   { to: "/settings/models", label: "Models", icon: Cpu, shortcut: "5" },
   { to: "/settings", label: "Settings", icon: Sliders, shortcut: "6" },
-  {
-    to: "/settings/feedback",
-    label: "Feedback",
-    icon: MessageSquare,
-    shortcut: "7",
-  },
 ];
 
 export default function AppShell(): React.JSX.Element {
