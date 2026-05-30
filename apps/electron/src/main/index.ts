@@ -495,6 +495,17 @@ function hidePill(): void {
   }
 }
 
+function resetOnboarding(): void {
+  writeSettings({ onboardingComplete: false });
+  if (settingsWindow) {
+    settingsWindow.loadURL(getDashboardURL("/onboarding"));
+    settingsWindow.show();
+    settingsWindow.focus();
+  } else {
+    showSettingsWindow();
+  }
+}
+
 function showSettingsWindow(): void {
   if (!settingsWindow) {
     createSettingsWindow();
@@ -567,6 +578,15 @@ function createTray(): void {
       label: "Check for Updates...",
       click: () => checkForUpdatesFromMenu(),
     },
+    ...(is.dev
+      ? [
+          { type: "separator" as const },
+          {
+            label: "Reset Onboarding",
+            click: resetOnboarding,
+          },
+        ]
+      : []),
     { type: "separator" },
     {
       label: "Quit",
@@ -620,6 +640,15 @@ app.whenReady().then(async () => {
                 label: "Check for Updates...",
                 click: () => checkForUpdatesFromMenu(),
               },
+              ...(is.dev
+                ? [
+                    { type: "separator" as const },
+                    {
+                      label: "Reset Onboarding",
+                      click: resetOnboarding,
+                    },
+                  ]
+                : []),
               { type: "separator" as const },
               { role: "hide" as const },
               { role: "hideOthers" as const },
@@ -827,6 +856,11 @@ app.whenReady().then(async () => {
   createTray();
 
   createAppWindow();
+
+  // Show the onboarding window automatically on first launch
+  if (readSettings().onboardingComplete !== true) {
+    showSettingsWindow();
+  }
 
   // -- Auto-update helpers --
   const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
