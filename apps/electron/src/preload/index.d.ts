@@ -5,6 +5,7 @@ declare global {
     electron: ElectronAPI;
     api: {
       pasteText: (text: string) => Promise<void>;
+      copyText: (text: string) => Promise<void>;
       updateHotkey: (hotkey: string) => void;
       reloadHotkey: () => void;
       setHotkeyMode: (mode: "hold" | "toggle") => void;
@@ -65,6 +66,9 @@ declare global {
       onPillPositionChanged: (
         callback: (position: string) => void,
       ) => () => void;
+      // Output mode
+      sendOutputModeChanged: (mode: string) => void;
+      onOutputModeChanged: (callback: (mode: string) => void) => () => void;
       // Hotkey error notifications
       onHotkeyError: (
         callback: (error: { message: string }) => void,

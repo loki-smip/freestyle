@@ -24,6 +24,7 @@ type BarMode = "connecting" | "listening" | "speaking";
 // ---------------------------------------------------------------------------
 
 let _soundEnabled = true;
+let _outputMode = "paste";
 let _toneCtx: AudioContext | null = null;
 
 function getToneCtx(): AudioContext {
@@ -243,9 +244,13 @@ export default function AppPage(): React.JSX.Element {
       }
 
       try {
-        await window.api.pasteText(finalText);
+        if (_outputMode === "clipboard") {
+          await window.api.copyText(finalText);
+        } else {
+          await window.api.pasteText(finalText);
+        }
       } catch (err) {
-        console.error("[pill] paste failed:", err);
+        console.error("[pill] paste/copy failed:", err);
       }
       window.api.sendTranscriptionDone();
 
@@ -772,14 +777,27 @@ export default function AppPage(): React.JSX.Element {
         if (data?.value === "false") _soundEnabled = false;
       })
       .catch(() => {});
+    getClient()
+      .api.settings[":key"].$get({ param: { key: "output_mode" } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.value) _outputMode = data.value;
+      })
+      .catch(() => {});
     window.api
       ?.getPillPosition()
       .then(applyPillPosition)
       .catch(() => {});
 
-    // Listen for live position changes from the settings UI
-    const remove = window.api?.onPillPositionChanged(applyPillPosition);
-    return () => remove?.();
+    // Listen for live changes from the settings UI
+    const removePillPos = window.api?.onPillPositionChanged(applyPillPosition);
+    const removeOutputMode = window.api?.onOutputModeChanged((mode) => {
+      _outputMode = mode;
+    });
+    return () => {
+      removePillPos?.();
+      removeOutputMode?.();
+    };
   }, [applyPillPosition]);
 
   const stateRef = useRef(state);

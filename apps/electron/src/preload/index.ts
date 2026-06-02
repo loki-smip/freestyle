@@ -5,6 +5,8 @@ import { contextBridge, ipcRenderer } from "electron";
 const api = {
   pasteText: (text: string): Promise<void> =>
     ipcRenderer.invoke("paste:text", text),
+  copyText: (text: string): Promise<void> =>
+    ipcRenderer.invoke("copy:text", text),
   updateHotkey: (hotkey: string): void =>
     ipcRenderer.send("hotkey:update", hotkey),
   reloadHotkey: (): void => ipcRenderer.send("hotkey:reload"),
@@ -140,6 +142,15 @@ const api = {
     ipcRenderer.on("settings:pill-position-changed", handler);
     return () =>
       ipcRenderer.removeListener("settings:pill-position-changed", handler);
+  },
+  // Output mode
+  sendOutputModeChanged: (mode: string): void =>
+    ipcRenderer.send("settings:output-mode-changed", mode),
+  onOutputModeChanged: (callback: (mode: string) => void): (() => void) => {
+    const handler = (_: unknown, mode: string): void => callback(mode);
+    ipcRenderer.on("settings:output-mode-changed", handler);
+    return () =>
+      ipcRenderer.removeListener("settings:output-mode-changed", handler);
   },
   // Hotkey error notifications
   onHotkeyError: (
