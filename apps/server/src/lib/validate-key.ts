@@ -146,6 +146,38 @@ async function validateMistral(apiKey: string): Promise<ValidationResult> {
   return { valid: false, error: `Mistral returned HTTP ${res.status}.` };
 }
 
+async function validateWhisperWebservice(apiKey: string): Promise<ValidationResult> {
+  try {
+    new URL(apiKey);
+  } catch {
+    return {
+      valid: false,
+      error: "Must be a valid URL (e.g., http://localhost:9000)",
+    };
+  }
+
+  try {
+    const res = await fetch(`${apiKey}/asr`, {
+      method: "POST",
+      body: new FormData(),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    // Even if it fails (no audio), if the endpoint exists it's valid
+    return { valid: true };
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "TimeoutError") {
+      return {
+        valid: false,
+        error: "Connection timed out. Ensure the webservice is running at that URL.",
+      };
+    }
+    return {
+      valid: false,
+      error: "Cannot reach the Whisper webservice at that URL.",
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
@@ -161,6 +193,7 @@ const LIVE_VALIDATORS: Record<
   anthropic: validateAnthropic,
   google: validateGoogle,
   mistral: validateMistral,
+  "whisper-webservice": validateWhisperWebservice,
 };
 
 export async function validateApiKey(
