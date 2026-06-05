@@ -4,6 +4,7 @@ import { GroqTranscriptionProvider } from "./providers/groq.js";
 import { MlxLocalTranscriptionProvider } from "./providers/mlx-local.js";
 import { OpenAITranscriptionProvider } from "./providers/openai.js";
 import { WhisperLocalTranscriptionProvider } from "./providers/whisper-local.js";
+import { WhisperWebserviceTranscriptionProvider } from "./providers/whisper-webservice.js";
 import type { TranscriptionProvider } from "./types.js";
 
 const providers: TranscriptionProvider[] = [
@@ -12,6 +13,7 @@ const providers: TranscriptionProvider[] = [
   new ElevenLabsTranscriptionProvider(),
   new GroqTranscriptionProvider(),
   new WhisperLocalTranscriptionProvider(),
+  new WhisperWebserviceTranscriptionProvider(),
   new MlxLocalTranscriptionProvider(),
 ];
 
