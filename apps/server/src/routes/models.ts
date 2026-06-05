@@ -163,6 +163,16 @@ const BUILTIN_VOICE_MODELS: AvailableModel[] = [
     family: "elevenlabs",
     type: "voice",
   },
+  {
+    provider_id: "whisper-webservice",
+    provider_name: "Whisper (Docker)",
+    model_id: "whisper-webservice/openai-whisper-asr",
+    model_name: "OpenAI Whisper (Local/Docker)",
+    family: "whisper-webservice",
+    type: "voice",
+    cost_input: 0,
+    cost_output: 0,
+  },
 ];
 
 // In-memory cache for models.dev data
